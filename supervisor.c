@@ -91,7 +91,7 @@ int main(int argc, char **argv){
         return 1;
     }
 
-    int S = atoi(argv[1]);
+    int S = atoi(argv[1]); //numero totale server 
 
     if(S < 1){
         fprintf(stdout, "Errore nel numero dei Server S: inserire un numero positivo \n");

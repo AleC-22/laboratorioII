@@ -47,7 +47,6 @@ void* gestione_client(void* info){
     struct timespec inizio;
     int shared_memory_fd;
 
-    // TODO: controllare che si possa fare anche con una stringa statica
     char *temp_stringa;
     sem_t *sem_Supervisor;
     sem_Supervisor = sem_open("/sem_Supervisor", 0666);

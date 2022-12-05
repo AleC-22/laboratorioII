@@ -13,9 +13,9 @@ int main(int argc, char **argv){
         return 1;
     }
 
-    int S = atoi(argv[1]);
-    int k = atoi(argv[2]);
-    int m = atoi(argv[3]);
+    int S = atoi(argv[1]); //numero di server totali
+    int k = atoi(argv[2]); //numero di server a cui connettersi
+    int m = atoi(argv[3]); //numero messaggi da inviare
     
     if(S < 1){
         fprintf(stdout, "Errore nel valore di S: inserire un numero positivo \n");

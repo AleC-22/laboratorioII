@@ -15,6 +15,10 @@
 
 #define SIZE_MEX sizeof(char)*1023
 
+pthread_cond_t condition[3];
+
+int shared_memory_fd;
+
 int ID_server;
 int socket_fd;
 
@@ -23,6 +27,7 @@ static void segnale_server(){
     sem_unlink("/sem_Supervisor");
     shm_unlink("/shared_memory");
     sem_unlink("/sem_can_copy");
+    close(shared_memory_fd);
     close(socket_fd);
     exit(0);
 }
@@ -32,6 +37,7 @@ struct inf_client{
     int *gest_max_fd;
     pthread_mutex_t *mutex_client;
     pthread_mutex_t *mutex_gest_client;
+    pthread_cond_t *condition;
 };
 
 void* gestione_client(void* info){
@@ -39,17 +45,18 @@ void* gestione_client(void* info){
     int* gest_max_fd = ((struct inf_client*) info) -> gest_max_fd;
     pthread_mutex_t* mutex_client = ((struct inf_client*) info) -> mutex_client;
     pthread_mutex_t* mutex_gest_client = ((struct inf_client*) info) -> mutex_gest_client;
+    pthread_cond_t* condition = ((struct inf_client*) info) -> condition;
     int byte_read;
     long int *buffer = (long int*) malloc(sizeof(long int));
     long int client_id;
     long int tempo_migliore;
     long int tempo_attuale;
     struct timespec inizio;
-    int shared_memory_fd;
-
     char *temp_stringa;
+
     sem_t *sem_Supervisor;
     sem_Supervisor = sem_open("/sem_Supervisor", 0666);
+
     if(sem_Supervisor == SEM_FAILED){
         perror("sem_open");
         exit(EXIT_FAILURE);
@@ -59,12 +66,14 @@ void* gestione_client(void* info){
         perror("SHM_OPEN");
         exit (1);
     }
+
     char *shared_data = (char*) mmap(NULL, SIZE_MEX, PROT_READ | PROT_WRITE, MAP_SHARED, shared_memory_fd, 0);
+
     if(!shared_data){
         perror("MMAP");
         exit (1);
     }
-    close(shared_memory_fd);
+
     sem_t *sem_can_copy;
     sem_can_copy = sem_open("/sem_can_copy", 0666);
     if(sem_can_copy == SEM_FAILED){
@@ -74,28 +83,30 @@ void* gestione_client(void* info){
      
     while(1){
         temp_stringa = (char*) malloc(sizeof(shared_data));
-        //sem_wait(&sem_all);
+
         pthread_mutex_lock(mutex_gest_client);
+        
+        pthread_cond_wait(condition, mutex_gest_client);
         fd_set temp_gest_client = *gest_client;
         int temp_max_fd = *gest_max_fd;
-        //pthread_mutex_unlock(mutex_gest_client);
+
+        pthread_mutex_unlock(mutex_gest_client);
         
-        if(select(temp_max_fd + 1, &temp_gest_client, NULL, NULL, NULL) < 0){
+        if(select(*(gest_max_fd) + 1, gest_client, NULL, NULL, NULL) < 0){
             perror("SELECT");
             exit(1);
         }
-        for(int temp_sock = 0; temp_sock <= temp_max_fd; temp_sock++){
-            
+
+        for(int temp_sock = 0; temp_sock <= *(gest_max_fd); temp_sock++){
             tempo_migliore = -1;
             tempo_attuale = -1;
-            if(FD_ISSET(temp_sock, &temp_gest_client)){
-                
-                while((byte_read = read(temp_sock, buffer, sizeof(buffer)))>0){
+            if(FD_ISSET(temp_sock, gest_client)){
+                while((byte_read = read(temp_sock, buffer, sizeof(buffer)))>0){ //leggo i messaggi e calcolo il secret.
                     client_id = be64toh(*buffer); 
                     clock_gettime(CLOCK_MONOTONIC, &inizio);
                     if(tempo_attuale == -1){
                         tempo_attuale = inizio.tv_sec * 1000 + (int)inizio.tv_nsec/1000000;
-                    } else {
+                    }else{
                         tempo_attuale = (inizio.tv_sec * 1000 + (int)inizio.tv_nsec/1000000) - tempo_attuale;
                         if(tempo_migliore == -1 || tempo_attuale < tempo_migliore){
                             tempo_migliore = tempo_attuale;
@@ -112,16 +123,18 @@ void* gestione_client(void* info){
                 sprintf(temp_stringa, "%ld!%ld!%d!", tempo_migliore, client_id, ID_server);
                 
                 pthread_mutex_lock(mutex_client);
-                sem_wait(sem_can_copy);
-                //fprintf(stdout, "SERVER %d COPY %s \n", ID_server, temp_stringa);
+                sem_wait(sem_can_copy); 
                 memcpy(shared_data, temp_stringa, SIZE_MEX); 
-                FD_CLR(temp_sock, gest_client);
-                while(!FD_ISSET(*gest_max_fd, gest_client)){
-                    (*gest_max_fd)--;
-                }
                 sem_post(sem_Supervisor);
+                pthread_mutex_lock (mutex_gest_client);
+                FD_CLR(temp_sock, gest_client);
+                if(temp_sock == *gest_max_fd){
+                    while(FD_ISSET(*gest_max_fd, gest_client) == 0){
+                        (*gest_max_fd)--;
+                    }
+                }
+                pthread_mutex_unlock (mutex_gest_client);
                 close(temp_sock);
-                //memset(&inizio, 0, sizeof(struct timespec));
                 pthread_mutex_unlock(mutex_client);
             }
         }
@@ -144,12 +157,12 @@ void* accettazione_client(){
     setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
     setsockopt(socket_fd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
 
-   if(bind(socket_fd,(struct sockaddr *)&sock_server,sizeof(sock_server)) < 0){
+    if(bind(socket_fd,(struct sockaddr *)&sock_server,sizeof(sock_server)) < 0){
         perror("BIND");
         exit (1);
     }
 
-    if(listen(socket_fd, 10) < 0){
+    if(listen(socket_fd, 3) < 0){
         perror("LISTEN");
         exit (1);
     }
@@ -158,18 +171,19 @@ void* accettazione_client(){
     pthread_mutex_t *mutex = (pthread_mutex_t*) malloc(sizeof(pthread_mutex_t)*3);
     pthread_mutex_t all_mutex;
     pthread_mutex_init(&all_mutex, NULL);
-    int max_fd_locale = 0; 
+    
+    int *max_fd = (int*)calloc(3,sizeof(int));
 
     for(int i = 0; i < 3; i++){
         FD_ZERO(&sock_clienti[i]);
         pthread_mutex_init(&mutex[i], NULL);
-        pthread_mutex_lock(&mutex[i]);
 
         struct inf_client *info = (struct inf_client*) malloc(sizeof(struct inf_client));
         info->gest_client = &(sock_clienti[i]);
-        info->mutex_client = &all_mutex;
+        info->mutex_client = &(all_mutex);
         info->mutex_gest_client = &(mutex[i]);
-        info->gest_max_fd = &max_fd_locale;
+        info->gest_max_fd = &(max_fd[i]);
+        info->condition = &(condition[i]);
         
         pthread_create (&(tid_gestione[i]), NULL, gestione_client, info);
         pthread_detach (tid_gestione[i]);
@@ -188,14 +202,13 @@ void* accettazione_client(){
             exit (1);
         }
 
-        //pthread_mutex_lock(&mutex[thread_worker]);
         FD_SET(client_accettato_fd, &sock_clienti[thread_worker]);
-        if(client_accettato_fd > max_fd_locale){
-            max_fd_locale = client_accettato_fd;
+        if(client_accettato_fd > max_fd[thread_worker]){
+            max_fd[thread_worker] = client_accettato_fd;
         }
-        pthread_mutex_unlock(&mutex[thread_worker]);
+        pthread_cond_signal(&condition[thread_worker]);  
+
         thread_worker = (thread_worker + 1) % 3;
-        //sem_post(&sem_all);
     }
 }
 
@@ -207,7 +220,6 @@ int main(int argc, char **argv){
     }
 
     ID_server = atoi(argv[1]);
-
     fprintf(stdout, "SERVER %d ACTIVE\n", ID_server);
 
     struct sigaction sign_S; 
@@ -219,12 +231,13 @@ int main(int argc, char **argv){
         perror("SIGACTION");
         return 1;
     }
-    //sem_init(&sem_all, 1, 0);
+
+    for(int i = 0; i < 3; i++){
+        pthread_cond_init(&condition[i], NULL);
+    }
 
     pthread_t tid_accettazione;
-   
     pthread_create (&tid_accettazione, NULL, accettazione_client, NULL);
-
     pthread_join   (tid_accettazione, NULL);
 
     return 0;

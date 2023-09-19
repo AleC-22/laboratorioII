@@ -12,6 +12,8 @@
 
 #define SIZE_MEX sizeof(char)*1024
 
+int shared_memory_fd;
+
 int count=0;
 struct timeval tempo_segnale;
 int secondi;
@@ -37,13 +39,15 @@ static void funzione_SIGINT(int signum){
     gettimeofday(&tempo_segnale, NULL);
     struct lista_tabella *temp = head;
     fprintf(stderr, "\n%20s | %20s | %20s \n", "ID Client", "Stima Secret", "Numero Server");
+
     while(temp != NULL){
         fprintf(stderr, "%20lx | %20d | %20d \n", temp->ID_client, temp->stima_secret, temp->numero_server);
         temp = temp->next;
     }
+
     if(count==1){
         secondi = tempo_segnale.tv_sec;
-    } else {
+    }else{
         if(tempo_segnale.tv_sec - secondi <= 1){
             struct lista_tabella *temp = head;
             fprintf(stdout, "\n%20s | %20s | %20s \n", "ID Client", "Stima Secret", "Numero Server");
@@ -68,8 +72,9 @@ static void funzione_SIGINT(int signum){
                 head = head->next;
                 free(temp);
             }
+            close(shared_memory_fd);
             exit(0);
-        } else {
+        }else{
             secondi = tempo_segnale.tv_sec;
         }
     }
@@ -84,14 +89,14 @@ int main(int argc, char **argv){
     struct sigaction nuovo_segnale;
     nuovo_segnale.sa_handler = funzione_SIGINT; 
     nuovo_segnale.sa_flags = SA_RESTART;
-    sigemptyset(&nuovo_segnale.sa_mask);
+    sigemptyset(&nuovo_segnale.sa_mask);    
     
     if(sigaction(SIGINT, &nuovo_segnale, NULL) < 0){
         perror("SIGACTION");
         return 1;
     }
 
-    int S = atoi(argv[1]); //numero totale server 
+    int S = atoi(argv[1]);
 
     if(S < 1){
         fprintf(stdout, "Errore nel numero dei Server S: inserire un numero positivo \n");
@@ -99,19 +104,19 @@ int main(int argc, char **argv){
     }
 
     fprintf(stdout, "SUPERVISOR STARTING %d SERVER \n", S); 
-
-    int shared_memory_fd;
+    
     if ((shared_memory_fd=shm_open("/shared_memory", O_CREAT | O_RDWR, 0666)) < 0){
         perror("SHM_OPEN");
         return 1;
     }
-    
+
     if(ftruncate(shared_memory_fd, SIZE_MEX) < 0){
         perror("FTRUNCATE");
         return 1;
     }
 
     char *shared_data = mmap(NULL, SIZE_MEX, PROT_READ | PROT_WRITE, MAP_SHARED, shared_memory_fd, 0);
+
     if(!shared_data){
         perror("MMAP");
         return 1;
@@ -119,11 +124,23 @@ int main(int argc, char **argv){
 
     close(shared_memory_fd);
 
+    sem_t *sem_Supervisor = sem_open("/sem_Supervisor", O_CREAT | O_RDWR, 0666, 0);
+        if(sem_Supervisor == SEM_FAILED){
+        perror("SEM_OPEN");
+            return 1;
+        }
+
+    sem_t *sem_can_copy = sem_open("/sem_can_copy", O_CREAT | O_RDWR, 0666, 1);
+        if(sem_can_copy == SEM_FAILED){
+            perror("SEM_OPEN");
+            return 1;
+        }
+
     int pid;
     int pid_Supervisor = getpid();
     int ID = 0;
-    char ID_string[5];
-    
+    char ID_string[5]; 
+
     for(int i=0; i<S; i++){
         if(getpid() == pid_Supervisor){
             ID++;
@@ -144,44 +161,27 @@ int main(int argc, char **argv){
                 temp2->next = temp;
             }
         }
-    }
+    } 
 
-    
     if(getpid() != pid_Supervisor){
         sprintf(ID_string, "%d", ID);
         execl("./server", "server", ID_string, NULL);
         fprintf(stderr, "Errore nell'esecuzione di execl \n");
-    } else { 
-        // stringa del tipo "stima_secret!id_client!id_server"
+    }else{ 
         char stima_secretSM[64];
         char ID_clientSM[64];
         char ID_serverSM[64];
         char *copia_stringa = (char*) malloc(SIZE_MEX);
-        
-        sem_t *sem_Supervisor = sem_open("/sem_Supervisor", O_CREAT, 0666, 0);
-        if(sem_Supervisor == SEM_FAILED){
-            perror("SEM_OPEN");
-            return 1;
-        }
-        sem_t *sem_can_copy = sem_open("/sem_can_copy", O_CREAT, 0666, 1);
-        if(sem_can_copy == SEM_FAILED){
-            perror("SEM_OPEN");
-            return 1;
-        }
-        //sem_post(sem_can_copy);
-        while(1){         
+        while(1){        
             sem_wait(sem_Supervisor);
             strcpy(copia_stringa, shared_data);
-            //fprintf(stdout,"[SUPERVISOR] TEMP STRING: %s\n",copia_stringa);
             strcpy(stima_secretSM, strtok(copia_stringa, "!"));
             strcpy(ID_clientSM, strtok(NULL, "!"));
-            strcpy(ID_serverSM, strtok(NULL, "!"));
-            //fprintf(stdout, "[SUPERVISOR] %s \n", copia_stringa);
+            strcpy(ID_serverSM, strtok(NULL, "!"));            
             long int ID_client= atol(ID_clientSM);
             int stima_secret = atoi(stima_secretSM);
-            if(stima_secret != -1 && ID_client != 0){
-                struct lista_tabella *new = (struct lista_tabella*) malloc(sizeof(struct lista_tabella));
-            
+            if(stima_secret > 0){
+                struct lista_tabella *new = (struct lista_tabella*) malloc(sizeof(struct lista_tabella));            
                 new->ID_client = ID_client;
                 new->stima_secret = stima_secret;
                 new->numero_server = 1;
@@ -189,16 +189,17 @@ int main(int argc, char **argv){
                 int flag;
                 if(head == NULL){
                     head = new;
-                } else {
+                }else{
                     struct lista_tabella *temp = head;
                     flag = 0;
                     while(temp != NULL){
                         if(temp->ID_client == new->ID_client){
                             flag = 1;
                             temp->numero_server++;
-                            if(new->stima_secret!=-1 && temp->stima_secret > new->stima_secret){
+                            if(new->stima_secret!=0 && new->stima_secret < temp->stima_secret){
                                 temp->stima_secret = new->stima_secret;
                             }
+                            break;
                         }
                         temp = temp->next;
                     }
@@ -210,10 +211,10 @@ int main(int argc, char **argv){
             }
             fprintf(stdout, "SUPERVISOR ESTIMATE %s FOR %lx FROM %s \n", stima_secretSM, ID_client, ID_serverSM);
             memset(shared_data, 0, SIZE_MEX);
-            memset(stima_secretSM, 0, sizeof(long) + sizeof(int));
-            memset(ID_clientSM, 0, sizeof(long) + sizeof(int));
-            memset(ID_serverSM, 0, sizeof(long) + sizeof(int));
-            sem_post(sem_can_copy); 
+            memset(stima_secretSM, 0, sizeof(stima_secretSM));
+            memset(ID_clientSM, 0, sizeof(ID_clientSM));
+            memset(ID_serverSM, 0, sizeof(ID_serverSM));
+            sem_post(sem_can_copy);
         }
     }
 }
